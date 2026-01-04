@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  
+  
+  <title>CPU Cache Write Policy: Write-through vs Write-back (and Write-Allocate) | C++ Systems Notes by Celine</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+  <meta name="description" content="Why this topic mattersCache write policy directly affects latency, memory bandwidth pressure, and multi-core correctness. In real systems (especially low-latency trading, real-time analytics, and game">
+<meta property="og:type" content="article">
+<meta property="og:title" content="CPU Cache Write Policy: Write-through vs Write-back (and Write-Allocate)">
+<meta property="og:url" content="https://celine2018.github.io/cppBlog/2026/01/04/CPU_Cache_Write_Policy/index.html">
+<meta property="og:site_name" content="C++ Systems Notes by Celine">
+<meta property="og:description" content="Why this topic mattersCache write policy directly affects latency, memory bandwidth pressure, and multi-core correctness. In real systems (especially low-latency trading, real-time analytics, and game">
+<meta property="og:locale" content="en_US">
+<meta property="article:published_time" content="2026-01-04T20:30:00.000Z">
+<meta property="article:modified_time" content="2026-01-04T21:30:38.239Z">
+<meta property="article:author" content="Celine">
+<meta property="article:tag" content="C++">
+<meta property="article:tag" content="Cache">
+<meta property="article:tag" content="Computer Architecture">
+<meta property="article:tag" content="Performance">
+<meta name="twitter:card" content="summary">
+  
+    <link rel="alternate" href="/cppBlog/atom.xml" title="C++ Systems Notes by Celine" type="application/atom+xml">
+  
+  
+    <link rel="shortcut icon" href="/cppBlog/favicon.png">
+  
+  
+  
+<link rel="stylesheet" href="/cppBlog/css/style.css">
+
+  
+    
+<link rel="stylesheet" href="/cppBlog/fancybox/jquery.fancybox.min.css">
+
+  
+  
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/fork-awesome@1.2.0/css/fork-awesome.min.css">
+
+<meta name="generator" content="Hexo 8.1.1"></head>
+
+<body>
+  <div id="container">
+    <div id="wrap">
+      <header id="header">
+  <div id="banner"></div>
+  <div id="header-outer" class="outer">
+    <div id="header-title" class="inner">
+      <h1 id="logo-wrap">
+        <a href="/cppBlog/" id="logo">C++ Systems Notes by Celine</a>
+      </h1>
+      
+        <h2 id="subtitle-wrap">
+          <a href="/cppBlog/" id="subtitle">Notes on C++, performance, and computer architecture</a>
+        </h2>
+      
+    </div>
+    <div id="header-inner" class="inner">
+      <nav id="main-nav">
+        <a id="main-nav-toggle" class="nav-icon"><span class="fa fa-bars"></span></a>
+        
+          <a class="main-nav-link" href="/cppBlog/">Home</a>
+        
+          <a class="main-nav-link" href="/cppBlog/archives">Archives</a>
+        
+      </nav>
+      <nav id="sub-nav">
+        
+        
+          <a class="nav-icon" href="/cppBlog/atom.xml" title="RSS Feed"><span class="fa fa-rss"></span></a>
+        
+        <a class="nav-icon nav-search-btn" title="Search"><span class="fa fa-search"></span></a>
+      </nav>
+      <div id="search-form-wrap">
+        <form action="//google.com/search" method="get" accept-charset="UTF-8" class="search-form"><input type="search" name="q" class="search-form-input" placeholder="Search"><button type="submit" class="search-form-submit">&#xF002;</button><input type="hidden" name="sitesearch" value="https://celine2018.github.io/cppBlog"></form>
+      </div>
+    </div>
+  </div>
+</header>
+
+      <div class="outer">
+        <section id="main"><article id="post-CPU_Cache_Write_Policy" class="h-entry article article-type-post" itemprop="blogPost" itemscope itemtype="https://schema.org/BlogPosting">
+  <div class="article-meta">
+    <a href="/cppBlog/2026/01/04/CPU_Cache_Write_Policy/" class="article-date">
+  <time class="dt-published" datetime="2026-01-04T20:30:00.000Z" itemprop="datePublished">2026-01-04</time>
+</a>
+    
+  </div>
+  <div class="article-inner">
+    
+    
+      <header class="article-header">
+        
+  
+    <h1 class="p-name article-title" itemprop="headline name">
+      CPU Cache Write Policy: Write-through vs Write-back (and Write-Allocate)
+    </h1>
+  
+
+      </header>
+    
+    <div class="e-content article-entry" itemprop="articleBody">
+      
+        <h2 id="Why-this-topic-matters"><a href="#Why-this-topic-matters" class="headerlink" title="Why this topic matters"></a>Why this topic matters</h2><p>Cache write policy directly affects latency, memory bandwidth pressure, and multi-core correctness. In real systems (especially low-latency trading, real-time analytics, and game&#x2F;graphics engines), a poor mental model of “where the latest value lives” leads to incorrect assumptions about performance, false sharing, and device&#x2F;DMA interactions.</p>
+<p>Getting this right also helps you reason about profiling results and why “a simple store” can become expensive under contention or coherence traffic.</p>
+<h2 id="One-sentence-takeaway"><a href="#One-sentence-takeaway" class="headerlink" title="One-sentence takeaway"></a>One-sentence takeaway</h2><p>Write-through updates cache and memory on every store, while write-back updates cache now and writes to memory later (on eviction&#x2F;flush), trading simplicity for much higher performance.</p>
+<h2 id="Core-concept-explained"><a href="#Core-concept-explained" class="headerlink" title="Core concept explained"></a>Core concept explained</h2><p>A write policy defines what happens when the CPU stores to an address that is (typically) already cached.</p>
+<h3 id="Write-through-直写-写穿"><a href="#Write-through-直写-写穿" class="headerlink" title="Write-through (直写 &#x2F; 写穿)"></a>Write-through (直写 &#x2F; 写穿)</h3><p>When the CPU writes a value:</p>
+<ol>
+<li>The cache line is updated.</li>
+<li>The same write is immediately propagated to the next level (eventually RAM).</li>
+</ol>
+<p>This keeps main memory up-to-date at all times, which simplifies reasoning about “what’s in RAM,” but it increases write traffic and can stall if the write path is saturated (even with a write buffer).</p>
+<h3 id="Write-back-回写"><a href="#Write-back-回写" class="headerlink" title="Write-back (回写)"></a>Write-back (回写)</h3><p>When the CPU writes a value:</p>
+<ol>
+<li>The cache line is updated.</li>
+<li>The cache line is marked <strong>dirty</strong> (meaning: “newer than memory”).</li>
+<li>Memory is updated later, typically when the line is evicted (replaced) or explicitly flushed.</li>
+</ol>
+<p>This reduces external memory traffic dramatically because multiple stores to the same cache line become one eventual writeback. The cost is complexity: the most recent value may live only in a private cache, not in RAM.</p>
+<p><strong>Key mental model:</strong> with write-back, RAM can be stale; the “truth” may be in a core’s cache until eviction&#x2F;flush&#x2F;coherence actions occur.</p>
+<h3 id="Important-add-on-Write-allocate-vs-No-write-allocate-applies-on-write-miss"><a href="#Important-add-on-Write-allocate-vs-No-write-allocate-applies-on-write-miss" class="headerlink" title="Important add-on: Write-allocate vs No-write-allocate (applies on write miss)"></a>Important add-on: Write-allocate vs No-write-allocate (applies on write miss)</h3><p>Write policy is often discussed alongside what happens on a <strong>write miss</strong> (the line is not in cache yet):</p>
+<ul>
+<li><strong>Write-allocate (fetch-on-write):</strong> on miss, fetch the whole cache line into cache, then perform the store in cache.<br>Common pairing: <strong>write-back + write-allocate</strong>.</li>
+<li><strong>No-write-allocate (write-around):</strong> on miss, do not bring the line into cache; write directly to lower level.<br>Common pairing: <strong>write-through + no-write-allocate</strong> (especially for streaming stores).</li>
+</ul>
+<p>So “write-through vs write-back” answers <strong>when memory is updated</strong>, while “allocate vs not” answers <strong>whether a miss pulls the line into cache</strong>.</p>
+<h2 id="How-it-is-used-in-practice"><a href="#How-it-is-used-in-practice" class="headerlink" title="How it is used in practice"></a>How it is used in practice</h2><h3 id="Why-CPUs-favor-write-back"><a href="#Why-CPUs-favor-write-back" class="headerlink" title="Why CPUs favor write-back"></a>Why CPUs favor write-back</h3><p>Most modern CPU data caches are write-back because it:</p>
+<ul>
+<li>Minimizes memory bandwidth usage.</li>
+<li>Improves store throughput by absorbing writes in cache.</li>
+<li>Exploits locality: many real workloads update nearby data repeatedly.</li>
+</ul>
+<p>This is especially important on multi-core systems where external writes also trigger coherence actions; writing less to memory generally reduces system-wide pressure.</p>
+<h3 id="When-write-through-shows-up"><a href="#When-write-through-shows-up" class="headerlink" title="When write-through shows up"></a>When write-through shows up</h3><p>Write-through can appear:</p>
+<ul>
+<li>In some embedded designs where simplicity and predictability matter more than peak throughput.</li>
+<li>In specific cache levels or special-purpose caches (design dependent).</li>
+<li>As a conceptual model for certain buffering layers.</li>
+</ul>
+<p>In general-purpose high-performance CPUs, you should assume write-back unless you are told otherwise.</p>
+<h3 id="Practical-consequences-for-C-engineers"><a href="#Practical-consequences-for-C-engineers" class="headerlink" title="Practical consequences for C++ engineers"></a>Practical consequences for C++ engineers</h3><p>Stores often “look cheap” in source code, but can become expensive if they cause:</p>
+<ul>
+<li>Cache line bouncing (false sharing).</li>
+<li>Evictions of dirty lines (writeback bursts).</li>
+<li>Saturation of write buffers or the memory subsystem.</li>
+</ul>
+<p>Memory-mapped I&#x2F;O (MMIO) or DMA scenarios require careful handling (flush&#x2F;invalidate or platform-provided coherence), because write-back means RAM may not reflect the latest data.</p>
+<h2 id="Common-pitfalls-or-misconceptions"><a href="#Common-pitfalls-or-misconceptions" class="headerlink" title="Common pitfalls or misconceptions"></a>Common pitfalls or misconceptions</h2><ol>
+<li><p><strong>Misconception:</strong> “After I write, RAM has the new value.”<br><strong>Reality:</strong> Under write-back, RAM may not be updated until eviction&#x2F;flush. The latest value might be in L1&#x2F;L2 (or another cache level) with the line marked dirty.</p>
+</li>
+<li><p><strong>Misconception:</strong> “Write policy is the same as cache coherence.”<br><strong>Reality:</strong> Write policy decides when lower memory is updated; coherence (MESI&#x2F;MOESI-like protocols) decides how multiple cores see consistent values and who owns&#x2F;invalidates lines. You can have coherent write-back caches where other cores still see your updates via coherence, even though RAM is stale.</p>
+</li>
+<li><p><strong>Misconception:</strong> “Write-through is always slower.”<br><strong>Reality:</strong> Write-through often increases traffic, but performance depends on workload and buffering. With strong write combining &#x2F; write buffers and streaming patterns, the gap can narrow. Still, write-back typically wins for general workloads with temporal locality.</p>
+</li>
+</ol>
+<h2 id="Practical-engineering-perspective"><a href="#Practical-engineering-perspective" class="headerlink" title="Practical engineering perspective"></a>Practical engineering perspective</h2><p><strong>In practice, strong understanding typically includes:</strong></p>
+<ul>
+<li>A correct definition of write-through and write-back.</li>
+<li>The notion of a <strong>dirty bit</strong> and eviction-triggered writeback.</li>
+<li>The main trade-off: simplicity vs bandwidth&#x2F;performance.</li>
+<li>Awareness that “RAM can be stale,” plus a brief mention of DMA&#x2F;MMIO implications or flush&#x2F;invalidate operations (no need to go deep unless asked).</li>
+</ul>
+<p><strong>Signals of strong understanding:</strong></p>
+<ul>
+<li>You mention write buffers, eviction behavior, and why write-back reduces traffic.</li>
+<li>You separate write policy from coherence.</li>
+<li>You optionally add write-allocate vs no-write-allocate on write miss.</li>
+</ul>
+<p><strong>Common signs of incomplete understanding:</strong></p>
+<ul>
+<li>“Write-back means it writes later, write-through writes now” with no mention of dirty lines&#x2F;eviction.</li>
+<li>Claiming memory is always updated on a store.</li>
+<li>Confusing write policy with coherence or memory ordering.</li>
+</ul>
+<h2 id="Summary-for-practical-use"><a href="#Summary-for-practical-use" class="headerlink" title="Summary for practical use"></a>Summary for practical use</h2><ul>
+<li><strong>Core idea:</strong> Write-through writes cache + memory immediately; write-back writes cache now and writes memory later (on eviction&#x2F;flush).</li>
+<li><strong>Key behaviour:</strong> Write-back uses dirty cache lines; RAM may be stale until writeback occurs.</li>
+<li><strong>Main trade-off:</strong> Write-through &#x3D; simpler consistency model but higher bandwidth&#x2F;latency; write-back &#x3D; higher performance but more complex interactions (DMA&#x2F;MMIO, eviction effects).</li>
+<li><strong>One common pitfall:</strong> Assuming a store immediately updates RAM under write-back.</li>
+<li><strong>One practical guideline:</strong> Assume modern CPUs use write-back; optimize to reduce dirty evictions and false sharing (cache line contention), and be cautious with DMA&#x2F;MMIO without proper cache maintenance.</li>
+</ul>
+<h2 id="Personal-takeaway"><a href="#Personal-takeaway" class="headerlink" title="Personal takeaway"></a>Personal takeaway</h2><p>Write policy reinforces the idea that memory is a hierarchy rather than a single, uniform place. In performance-critical systems, stores should be thought of as operations that primarily modify cache state first, with updates to main memory occurring later depending on eviction, flush, and coherence behavior.</p>
+<p>This mental model has made me more deliberate about cache-line locality, false sharing avoidance, and understanding the correctness boundaries around device I&#x2F;O and shared-memory communication in real systems.</p>
+
+      
+    </div>
+    <footer class="article-footer">
+      <a data-url="https://celine2018.github.io/cppBlog/2026/01/04/CPU_Cache_Write_Policy/" data-id="cuidKRZ9So21d9o1Bkr1jd3nb" data-title="CPU Cache Write Policy: Write-through vs Write-back (and Write-Allocate)" class="article-share-link"><span class="fa fa-share">Share</span></a>
+      
+      
+      
+  <ul class="article-tag-list" itemprop="keywords"><li class="article-tag-list-item"><a class="article-tag-list-link" href="/cppBlog/tags/C/" rel="tag">C++</a></li><li class="article-tag-list-item"><a class="article-tag-list-link" href="/cppBlog/tags/Cache/" rel="tag">Cache</a></li><li class="article-tag-list-item"><a class="article-tag-list-link" href="/cppBlog/tags/Computer-Architecture/" rel="tag">Computer Architecture</a></li><li class="article-tag-list-item"><a class="article-tag-list-link" href="/cppBlog/tags/Performance/" rel="tag">Performance</a></li></ul>
+
+    </footer>
+  </div>
+  
+    
+  
+</article>
+
+
+</section>
+        
+          <aside id="sidebar">
+  
+    
+
+  
+    
+  <div class="widget-wrap">
+    <h3 class="widget-title">Tags</h3>
+    <div class="widget">
+      <ul class="tag-list" itemprop="keywords"><li class="tag-list-item"><a class="tag-list-link" href="/cppBlog/tags/C/" rel="tag">C++</a></li><li class="tag-list-item"><a class="tag-list-link" href="/cppBlog/tags/Cache/" rel="tag">Cache</a></li><li class="tag-list-item"><a class="tag-list-link" href="/cppBlog/tags/Computer-Architecture/" rel="tag">Computer Architecture</a></li><li class="tag-list-item"><a class="tag-list-link" href="/cppBlog/tags/Performance/" rel="tag">Performance</a></li></ul>
+    </div>
+  </div>
+
+
+  
+    
+  <div class="widget-wrap">
+    <h3 class="widget-title">Tag Cloud</h3>
+    <div class="widget tagcloud">
+      <a href="/cppBlog/tags/C/" style="font-size: 10px;">C++</a> <a href="/cppBlog/tags/Cache/" style="font-size: 10px;">Cache</a> <a href="/cppBlog/tags/Computer-Architecture/" style="font-size: 10px;">Computer Architecture</a> <a href="/cppBlog/tags/Performance/" style="font-size: 10px;">Performance</a>
+    </div>
+  </div>
+
+  
+    
+  <div class="widget-wrap">
+    <h3 class="widget-title">Archives</h3>
+    <div class="widget">
+      <ul class="archive-list"><li class="archive-list-item"><a class="archive-list-link" href="/cppBlog/archives/2026/01/">January 2026</a></li></ul>
+    </div>
+  </div>
+
+
+  
+    
+  <div class="widget-wrap">
+    <h3 class="widget-title">Recent Posts</h3>
+    <div class="widget">
+      <ul>
+        
+          <li>
+            <a href="/cppBlog/2026/01/04/CPU_Cache_Write_Policy/">CPU Cache Write Policy: Write-through vs Write-back (and Write-Allocate)</a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+
+  
+</aside>
+        
+      </div>
+      <footer id="footer">
+  
+  <div class="outer">
+    <div id="footer-info" class="inner">
+      
+      &copy; 2026 Celine<br>
+      Powered by <a href="https://hexo.io/" target="_blank">Hexo</a>
+    </div>
+  </div>
+</footer>
+
+    </div>
+    <nav id="mobile-nav">
+  
+    <a href="/cppBlog/" class="mobile-nav-link">Home</a>
+  
+    <a href="/cppBlog/archives" class="mobile-nav-link">Archives</a>
+  
+</nav>
+    
+
+
+<script src="/cppBlog/js/jquery-3.6.4.min.js"></script>
+
+
+
+  
+<script src="/cppBlog/fancybox/jquery.fancybox.min.js"></script>
+
+
+
+
+<script src="/cppBlog/js/script.js"></script>
+
+
+
+
+
+  </div>
+</body>
+</html>
